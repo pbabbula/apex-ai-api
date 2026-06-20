@@ -52,15 +52,15 @@ Return response in clean HTML format.
 """
 
         # ✅ ✅ NEW CHAT API (IMPORTANT!)
-        response = co.chat(
-            model="command",   # ✅ latest model
-            message=prompt,
-            temperature=0.3
-        )
+       response = co.chat(
+    model="command-a-03-2025",
+    message=prompt,
+    temperature=0.3
+)
 
-        fsd_output = response.text
+fsd_output = response.text
 
-        return {"document": fsd_output}
+return {"document": fsd_output}
 
     except Exception as e:
         return {"document": f"Error generating FSD: {str(e)}"}
