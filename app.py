@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 import requests
+import json
 
 # ✅ NEW: Add OpenAI
 from openai import OpenAI
