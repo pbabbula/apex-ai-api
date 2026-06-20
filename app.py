@@ -3,7 +3,6 @@ import requests
 import cohere
 import os
 
-# ✅ Cohere client
 co = cohere.Client(os.getenv("COHERE_API_KEY"))
 
 app = FastAPI()
@@ -22,7 +21,6 @@ async def generate_doc(data: dict):
         project_name = data.get("project_name")
         file_url = data.get("file_url")
 
-        # ✅ Read file
         try:
             file_content = requests.get(file_url).text
         except Exception as e:
@@ -30,7 +28,6 @@ async def generate_doc(data: dict):
 
         file_content = file_content[:3000]
 
-        # ✅ Prompt
         prompt = f"""
 Generate a professional Functional Specification Document (FSD).
 
@@ -48,19 +45,19 @@ Create sections:
 - Use Cases
 - Assumptions
 
-Return response in clean HTML format.
+Return output in HTML format.
 """
 
-        # ✅ ✅ NEW CHAT API (IMPORTANT!)
-       response = co.chat(
-    model="command-a-03-2025",
-    message=prompt,
-    temperature=0.3
-)
+        # ✅ CORRECT INDENTATION (important)
+        response = co.chat(
+            model="command-a-03-2025",
+            message=prompt,
+            temperature=0.3
+        )
 
-fsd_output = response.text
+        fsd_output = response.text
 
-return {"document": fsd_output}
+        return {"document": fsd_output}
 
     except Exception as e:
         return {"document": f"Error generating FSD: {str(e)}"}
