@@ -53,7 +53,7 @@ Return response in clean HTML format.
 
         # ✅ ✅ NEW CHAT API (IMPORTANT!)
         response = co.chat(
-            model="command-r",   # ✅ latest model
+            model="command",   # ✅ latest model
             message=prompt,
             temperature=0.3
         )
