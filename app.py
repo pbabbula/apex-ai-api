@@ -5,7 +5,11 @@ import requests
 from openai import OpenAI
 
 # ✅ Initialize AI client (will use API key from environment later)
-client = OpenAI()
+import os
+
+client = OpenAI(
+    api_key=os.getenv("udnSXMmzM88mzpIF4pKDIUukJn0XB2pgRXUHmQAq")
+)
 
 app = FastAPI(
     title="APEX AI API",
