@@ -30,6 +30,7 @@ async def generate_doc(data: dict):
 
         file_content = file_content[:3000]
 
+        # ✅ Prompt
         prompt = f"""
 Generate a professional Functional Specification Document (FSD).
 
@@ -47,16 +48,17 @@ Create sections:
 - Use Cases
 - Assumptions
 
-Return in HTML format.
+Return response in clean HTML format.
 """
 
-        response = co.generate(
-            model='command',
-            prompt=prompt,
-            max_tokens=800
+        # ✅ ✅ NEW CHAT API (IMPORTANT!)
+        response = co.chat(
+            model="command-r",   # ✅ latest model
+            message=prompt,
+            temperature=0.3
         )
 
-        fsd_output = response.generations[0].text
+        fsd_output = response.text
 
         return {"document": fsd_output}
 
