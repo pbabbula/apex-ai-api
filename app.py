@@ -34,7 +34,7 @@ async def generate_doc(data: dict):
     <p><b>Name:</b> {project_name}</p>
 
     <h2>Details</h2>
-    <p>{file_content}</p>
+    <p>{file_content[:1000]}</p>
     """
 
     return {"document": html}
