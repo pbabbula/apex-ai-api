@@ -1,7 +1,14 @@
 from fastapi import FastAPI
 import requests
 
-app = FastAPI()
+app = FastAPI(
+    title="APEX AI API",
+    version="1.0",
+    docs_url="/docs",
+    redoc_url="/redoc",
+    openapi_url="/openapi.json"
+)
+
 
 @app.get("/")
 def home():
