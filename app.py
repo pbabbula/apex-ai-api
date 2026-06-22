@@ -1,13 +1,10 @@
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi import FastAPI
+from fastapi.responses import StreamingResponse
 import requests
-import os
 import io
+import os
 import cohere
-import mimetypes
-from pathlib import Path
-from uuid import uuid4
-from datetime import datetime
+
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import A4
 
@@ -20,19 +17,8 @@ import pandas as pd
 # Configuration
 # -------------------------------------------------------------------
 
-BASE_URL = os.getenv(
-    "BASE_URL",
-    "https://python-document-new-2.onrender.com"
-)
-
-FILES_DIR = Path(os.getcwd()) / "generated_files"
-FILES_DIR.mkdir(parents=True, exist_ok=True)
-
-# Cohere client
 co = cohere.Client(os.getenv("COHERE_API_KEY"))
-
 app = FastAPI()
-
 
 # -------------------------------------------------------------------
 # Home endpoint
@@ -44,14 +30,14 @@ def home():
 
 
 # -------------------------------------------------------------------
-# Helper: Create PDF from generated FSD text
+# Create PDF in memory (NO FILE SAVING)
 # -------------------------------------------------------------------
 
-def create_pdf_from_text(text: str, pdf_path: Path, project_id=None, project_name=None):
-    c = canvas.Canvas(str(pdf_path), pagesize=A4)
-    width, height = A4
+def create_pdf_buffer(text: str, project_id=None, project_name=None):
+    buffer = io.BytesIO()
+    c = canvas.Canvas(buffer, pagesize=A4)
 
-    c.setTitle("Functional Specification Document")
+    width, height = A4
 
     x = 50
     y = height - 50
@@ -79,7 +65,6 @@ def create_pdf_from_text(text: str, pdf_path: Path, project_id=None, project_nam
             c.setFont("Helvetica", 10)
             y = height - 50
 
-        # Basic heading handling
         clean_line = line.strip()
 
         if not clean_line:
@@ -91,7 +76,6 @@ def create_pdf_from_text(text: str, pdf_path: Path, project_id=None, project_nam
         else:
             c.setFont("Helvetica", 10)
 
-        # Wrap long lines manually
         max_chars = 100
         while len(clean_line) > max_chars:
             c.drawString(x, y, clean_line[:max_chars])
@@ -107,6 +91,9 @@ def create_pdf_from_text(text: str, pdf_path: Path, project_id=None, project_nam
         y -= line_height
 
     c.save()
+    buffer.seek(0)
+
+    return buffer
 
 
 # -------------------------------------------------------------------
@@ -117,17 +104,16 @@ def create_pdf_from_text(text: str, pdf_path: Path, project_id=None, project_nam
 async def generate_doc(data: dict):
 
     try:
-        project_id = data.get("project_id")
-        project_name = data.get("project_name")
+        project_id = data.get("project_id", "NA")
+        project_name = data.get("project_name", "NA")
         file_url = data.get("file_url")
 
         if not file_url:
-            return {
-                "status": "ERROR",
-                "message": "file_url is required"
-            }
+            return {"status": "ERROR", "message": "file_url is required"}
 
-        # Download file
+        # -------------------------
+        # Download input file
+        # -------------------------
         response = requests.get(file_url, timeout=30)
         response.raise_for_status()
 
@@ -136,7 +122,10 @@ async def generate_doc(data: dict):
 
         text_content = ""
 
-        # DOCX
+        # -------------------------
+        # Parse file
+        # -------------------------
+
         if file_type == "docx":
             doc = Document(io.BytesIO(file_content))
 
@@ -154,7 +143,6 @@ async def generate_doc(data: dict):
                     if row_text:
                         text_content += " | ".join(row_text) + "\n"
 
-        # PPTX
         elif file_type == "pptx":
             prs = Presentation(io.BytesIO(file_content))
 
@@ -163,23 +151,22 @@ async def generate_doc(data: dict):
                     if hasattr(shape, "text") and shape.text.strip():
                         text_content += shape.text + "\n"
 
-        # EXCEL
         elif file_type in ["xlsx", "xls"]:
             df = pd.read_excel(io.BytesIO(file_content))
             text_content = df.to_string(index=False)
 
-        # TEXT / MD
         elif file_type in ["txt", "md"]:
             text_content = file_content.decode("utf-8", errors="ignore")
 
         else:
-            return {
-                "status": "ERROR",
-                "message": f"Unsupported file type: {file_type}"
-            }
+            return {"status": "ERROR", "message": f"Unsupported file type: {file_type}"}
 
-        # Limit input size for AI
+        # Limit size
         text_content = text_content[:3000]
+
+        # -------------------------
+        # AI Prompt
+        # -------------------------
 
         prompt = f"""
 Generate a professional Functional Specification Document (FSD).
@@ -204,7 +191,10 @@ Structure:
 6. Assumptions
 """
 
-        # Cohere Chat API
+        # -------------------------
+        # Cohere API
+        # -------------------------
+
         ai_response = co.chat(
             model="command-a-03-2025",
             message=prompt,
@@ -213,72 +203,28 @@ Structure:
 
         fsd_output = ai_response.text
 
-        # ------------------------------------------------------------
-        # Save generated FSD files
-        # ------------------------------------------------------------
+        # -------------------------
+        # Generate PDF (in memory)
+        # -------------------------
 
-        unique_id = f"{project_id}_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}_{uuid4().hex[:8]}"
-
-        txt_file_name = f"fsd_{unique_id}.txt"
-        txt_file_path = FILES_DIR / txt_file_name
-
-        pdf_file_name = f"fsd_{unique_id}.pdf"
-        pdf_file_path = FILES_DIR / pdf_file_name
-
-        # Save TXT
-        with open(txt_file_path, "w", encoding="utf-8") as f:
-            f.write(fsd_output)
-
-        # Save PDF
-        create_pdf_from_text(
-            text=fsd_output,
-            pdf_path=pdf_file_path,
-            project_id=project_id,
-            project_name=project_name
+        pdf_buffer = create_pdf_buffer(
+            fsd_output,
+            project_id,
+            project_name
         )
 
-        return {
-            "status": "SUCCESS",
-            "message": "FSD generated successfully",
-            "document": fsd_output,
+        # -------------------------
+        # Direct download response
+        # -------------------------
 
-            "txt_file_name": txt_file_name,
-            "txt_download_link": f"{BASE_URL}/download/{txt_file_name}",
-
-            "pdf_file_name": pdf_file_name,
-            "pdf_download_link": f"{BASE_URL}/download/{pdf_file_name}"
-        }
+        return StreamingResponse(
+            pdf_buffer,
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": f"attachment; filename=FSD_{project_id}.pdf"
+            }
+        )
 
     except Exception as e:
-        return {
-            "status": "ERROR",
-            "message": f"Error generating FSD: {str(e)}"
-        }
-
-
-# -------------------------------------------------------------------
-# Download endpoint
-# -------------------------------------------------------------------
-
-@app.get("/download/{file_name}")
-def download_file(file_name: str):
-    safe_file_name = Path(file_name).name
-    file_path = FILES_DIR / safe_file_name
-
-    if not file_path.exists() or not file_path.is_file():
-        raise HTTPException(status_code=404, detail="File not found")
-
-    media_type, _ = mimetypes.guess_type(str(file_path))
-
-    if not media_type:
-        media_type = "application/octet-stream"
-
-    return FileResponse(
-        path=str(file_path),
-        media_type=media_type,
-        filename=safe_file_name,
-        headers={
-            "Content-Disposition": f'attachment; filename="{safe_file_name}"',
-            "Cache-Control": "no-store"
-        }
-    )
+        return {"status": "ERROR", "message": str(e)}
+ 
