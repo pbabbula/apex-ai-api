@@ -4,6 +4,8 @@ import requests
 import io
 import os
 import cohere
+import base64
+from uuid import uuid4
 
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import A4
@@ -18,7 +20,16 @@ import pandas as pd
 # -------------------------------------------------------------------
 
 co = cohere.Client(os.getenv("COHERE_API_KEY"))
+
+BASE_URL = os.getenv(
+    "BASE_URL",
+    "https://apex-ai-api.onrender.com"
+)
+
 app = FastAPI()
+
+# Temporary memory store (for download link)
+TEMP_STORE = {}
 
 # -------------------------------------------------------------------
 # Home endpoint
@@ -30,7 +41,7 @@ def home():
 
 
 # -------------------------------------------------------------------
-# Create PDF in memory (NO FILE SAVING)
+# Create PDF in memory
 # -------------------------------------------------------------------
 
 def create_pdf_buffer(text: str, project_id=None, project_name=None):
@@ -112,7 +123,7 @@ async def generate_doc(data: dict):
             return {"status": "ERROR", "message": "file_url is required"}
 
         # -------------------------
-        # Download input file
+        # Download file
         # -------------------------
         response = requests.get(file_url, timeout=30)
         response.raise_for_status()
@@ -204,7 +215,7 @@ Structure:
         fsd_output = ai_response.text
 
         # -------------------------
-        # Generate PDF (in memory)
+        # Generate PDF in memory
         # -------------------------
 
         pdf_buffer = create_pdf_buffer(
@@ -213,18 +224,47 @@ Structure:
             project_name
         )
 
+        pdf_bytes = pdf_buffer.getvalue()
+
+        # Generate unique ID
+        file_id = str(uuid4())
+
+        # Store PDF in memory
+        TEMP_STORE[file_id] = pdf_bytes
+
+        # Convert to base64 (for APEX)
+        pdf_base64 = base64.b64encode(pdf_bytes).decode("utf-8")
+
         # -------------------------
-        # Direct download response
+        # Final response
         # -------------------------
 
-        return StreamingResponse(
-            pdf_buffer,
-            media_type="application/pdf",
-            headers={
-                "Content-Disposition": f"attachment; filename=FSD_{project_id}.pdf"
-            }
-        )
+        return {
+            "status": "SUCCESS",
+            "document": fsd_output,
+            "pdf_base64": pdf_base64,
+            "download_link": f"{BASE_URL}/download-inline/{file_id}"
+        }
 
     except Exception as e:
         return {"status": "ERROR", "message": str(e)}
- 
+
+
+# -------------------------------------------------------------------
+# Download endpoint (link)
+# -------------------------------------------------------------------
+
+@app.get("/download-inline/{file_id}")
+def download_inline(file_id: str):
+    if file_id not in TEMP_STORE:
+        return {"status": "ERROR", "message": "File expired"}
+
+    file_bytes = TEMP_STORE[file_id]
+
+    return StreamingResponse(
+        io.BytesIO(file_bytes),
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": "attachment; filename=FSD.pdf"
+        }
+    )
