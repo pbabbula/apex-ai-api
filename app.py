@@ -5,7 +5,9 @@ import io
 import os
 import cohere
 import base64
+import binascii
 from uuid import uuid4
+from pathlib import Path
 
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import A4
@@ -13,9 +15,10 @@ from reportlab.lib.pagesizes import A4
 from docx import Document
 from pptx import Presentation
 import pandas as pd
+from PyPDF2 import PdfReader
 
 # -------------------------------------------------------------------
-# Configuration
+# Config
 # -------------------------------------------------------------------
 
 co = cohere.Client(os.getenv("COHERE_API_KEY"))
@@ -26,21 +29,61 @@ BASE_URL = os.getenv(
 )
 
 app = FastAPI()
-
-# Temporary memory store
 TEMP_STORE = {}
 
 # -------------------------------------------------------------------
-# Home endpoint
+# Extract content (IMPROVED from 1st code)
 # -------------------------------------------------------------------
 
-@app.get("/")
-def home():
-    return {"message": "API is live"}
+def extract_file_content(file_bytes: bytes, file_type: str) -> str:
+    file_type = file_type.lower()
+    text = ""
+
+    try:
+        if file_type == "docx":
+            doc = Document(io.BytesIO(file_bytes))
+
+            for p in doc.paragraphs:
+                if p.text.strip():
+                    text += p.text + "\n"
+
+            for table in doc.tables:
+                for row in table.rows:
+                    row_text = [cell.text.strip() for cell in row.cells if cell.text.strip()]
+                    if row_text:
+                        text += " | ".join(row_text) + "\n"
+
+        elif file_type == "pptx":
+            prs = Presentation(io.BytesIO(file_bytes))
+            for slide in prs.slides:
+                for shape in slide.shapes:
+                    if hasattr(shape, "text") and shape.text.strip():
+                        text += shape.text + "\n"
+
+        elif file_type in ["xlsx", "xls"]:
+            df = pd.read_excel(io.BytesIO(file_bytes))
+            text = df.to_string(index=False)
+
+        elif file_type == "pdf":
+            reader = PdfReader(io.BytesIO(file_bytes))
+            for i, page in enumerate(reader.pages):
+                page_text = page.extract_text() or ""
+                text += f"\n--- Page {i+1} ---\n{page_text}"
+
+        elif file_type in ["txt", "csv", "json", "xml", "html"]:
+            text = file_bytes.decode("utf-8", errors="ignore")
+
+        else:
+            text = "Unsupported file type"
+
+    except Exception as e:
+        text = f"Error processing file: {str(e)}"
+
+    return text
 
 
 # -------------------------------------------------------------------
-# Create PDF in memory
+# PDF Creator (same as yours)
 # -------------------------------------------------------------------
 
 def create_pdf_buffer(text: str, project_id=None, project_name=None):
@@ -69,8 +112,6 @@ def create_pdf_buffer(text: str, project_id=None, project_name=None):
     y -= 10
 
     for line in text.splitlines():
-
-        # New page if needed
         if y < 50:
             c.showPage()
             c.setFont("Helvetica", 10)
@@ -82,23 +123,16 @@ def create_pdf_buffer(text: str, project_id=None, project_name=None):
             y -= line_height
             continue
 
-        # Heading detection
         if clean_line.endswith(":") or clean_line[:2].isdigit():
             c.setFont("Helvetica-Bold", 11)
         else:
             c.setFont("Helvetica", 10)
 
-        # Line wrap
         max_chars = 100
         while len(clean_line) > max_chars:
             c.drawString(x, y, clean_line[:max_chars])
             clean_line = clean_line[max_chars:]
             y -= line_height
-
-            if y < 50:
-                c.showPage()
-                c.setFont("Helvetica", 10)
-                y = height - 50
 
         c.drawString(x, y, clean_line)
         y -= line_height
@@ -109,7 +143,7 @@ def create_pdf_buffer(text: str, project_id=None, project_name=None):
 
 
 # -------------------------------------------------------------------
-# Generate FSD endpoint
+# MAIN ENDPOINT (ENHANCED)
 # -------------------------------------------------------------------
 
 @app.post("/generate-doc")
@@ -118,68 +152,44 @@ async def generate_doc(data: dict):
     try:
         project_id = data.get("project_id", "NA")
         project_name = data.get("project_name", "NA")
+
         file_url = data.get("file_url")
+        base64_content = data.get("base64_content")
+        file_name = data.get("file_name", "file.bin")
 
-        if not file_url:
-            return JSONResponse(
-                status_code=400,
-                content={"status": "ERROR", "message": "file_url is required"}
-            )
-
-        # -------------------------
-        # Download file
-        # -------------------------
-        response = requests.get(file_url, timeout=30)
-        response.raise_for_status()
-
-        file_content = response.content
-        file_type = file_url.split(".")[-1].lower().split("?")[0]
-
-        text_content = ""
+        file_bytes = None
+        file_type = None
 
         # -------------------------
-        # Parse file
+        # OPTION 1: URL
         # -------------------------
+        if file_url:
+            response = requests.get(file_url, timeout=30)
+            response.raise_for_status()
 
-        if file_type == "docx":
-            doc = Document(io.BytesIO(file_content))
+            file_bytes = response.content
+            file_type = file_url.split(".")[-1].split("?")[0]
 
-            for para in doc.paragraphs:
-                if para.text.strip():
-                    text_content += para.text + "\n"
+        # -------------------------
+        # OPTION 2: BASE64
+        # -------------------------
+        elif base64_content:
+            file_bytes = base64.b64decode(base64_content)
 
-            for table in doc.tables:
-                for row in table.rows:
-                    row_text = [
-                        cell.text.strip()
-                        for cell in row.cells
-                        if cell.text.strip()
-                    ]
-                    if row_text:
-                        text_content += " | ".join(row_text) + "\n"
-
-        elif file_type == "pptx":
-            prs = Presentation(io.BytesIO(file_content))
-
-            for slide in prs.slides:
-                for shape in slide.shapes:
-                    if hasattr(shape, "text") and shape.text.strip():
-                        text_content += shape.text + "\n"
-
-        elif file_type in ["xlsx", "xls"]:
-            df = pd.read_excel(io.BytesIO(file_content))
-            text_content = df.to_string(index=False)
-
-        elif file_type in ["txt", "md"]:
-            text_content = file_content.decode("utf-8", errors="ignore")
+            suffix = Path(file_name).suffix
+            file_type = suffix.replace(".", "")
 
         else:
             return JSONResponse(
                 status_code=400,
-                content={"status": "ERROR", "message": f"Unsupported file type: {file_type}"}
+                content={"status": "ERROR", "message": "Provide file_url or base64_content"}
             )
 
-        # Limit size
+        # -------------------------
+        # Extract content
+        # -------------------------
+        text_content = extract_file_content(file_bytes, file_type)
+
         text_content = text_content[:3000]
 
         # -------------------------
@@ -192,14 +202,14 @@ Project ID: {project_id}
 Project Name: {project_name}
 
 STRICT RULES:
-- Do NOT include HTML or CSS
-- Return clean plain text only
-- Use clear headings and bullet points
+- No HTML
+- Clean formatting
+- Use headings
 
 Content:
 {text_content}
 
-Structure:
+Sections:
 1. Overview
 2. Scope
 3. Business Requirements
@@ -208,9 +218,6 @@ Structure:
 6. Assumptions
 """
 
-        # -------------------------
-        # Cohere API
-        # -------------------------
         ai_response = co.chat(
             model="command-a-03-2025",
             message=prompt,
@@ -222,17 +229,10 @@ Structure:
         # -------------------------
         # Generate PDF
         # -------------------------
-        pdf_buffer = create_pdf_buffer(
-            fsd_output,
-            project_id,
-            project_name
-        )
-
+        pdf_buffer = create_pdf_buffer(fsd_output, project_id, project_name)
         pdf_bytes = pdf_buffer.getvalue()
 
         file_id = str(uuid4())
-
-        # Store in memory
         TEMP_STORE[file_id] = pdf_bytes
 
         pdf_base64 = base64.b64encode(pdf_bytes).decode("utf-8")
@@ -241,7 +241,8 @@ Structure:
             "status": "SUCCESS",
             "document": fsd_output,
             "pdf_base64": pdf_base64,
-            "download_link": f"{BASE_URL}/download-inline/{file_id}"
+            "download_link": f"{BASE_URL}/download-inline/{file_id}",
+            "detected_file_type": file_type
         }
 
     except Exception as e:
@@ -252,7 +253,7 @@ Structure:
 
 
 # -------------------------------------------------------------------
-# Download endpoint
+# DOWNLOAD
 # -------------------------------------------------------------------
 
 @app.get("/download-inline/{file_id}")
@@ -264,10 +265,8 @@ def download_inline(file_id: str):
             content={"status": "ERROR", "message": "File expired"}
         )
 
-    file_bytes = TEMP_STORE[file_id]
-
     return StreamingResponse(
-        io.BytesIO(file_bytes),
+        io.BytesIO(TEMP_STORE[file_id]),
         media_type="application/pdf",
         headers={
             "Content-Disposition": "attachment; filename=FSD.pdf",
