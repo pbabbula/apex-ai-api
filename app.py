@@ -1,5 +1,5 @@
 from fastapi import FastAPI
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 import requests
 import io
 import os
@@ -10,7 +10,6 @@ from uuid import uuid4
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import A4
 
-# Document libraries
 from docx import Document
 from pptx import Presentation
 import pandas as pd
@@ -28,7 +27,7 @@ BASE_URL = os.getenv(
 
 app = FastAPI()
 
-# Temporary memory store (for download link)
+# Temporary memory store
 TEMP_STORE = {}
 
 # -------------------------------------------------------------------
@@ -49,7 +48,6 @@ def create_pdf_buffer(text: str, project_id=None, project_name=None):
     c = canvas.Canvas(buffer, pagesize=A4)
 
     width, height = A4
-
     x = 50
     y = height - 50
     line_height = 16
@@ -71,6 +69,8 @@ def create_pdf_buffer(text: str, project_id=None, project_name=None):
     y -= 10
 
     for line in text.splitlines():
+
+        # New page if needed
         if y < 50:
             c.showPage()
             c.setFont("Helvetica", 10)
@@ -82,11 +82,13 @@ def create_pdf_buffer(text: str, project_id=None, project_name=None):
             y -= line_height
             continue
 
+        # Heading detection
         if clean_line.endswith(":") or clean_line[:2].isdigit():
             c.setFont("Helvetica-Bold", 11)
         else:
             c.setFont("Helvetica", 10)
 
+        # Line wrap
         max_chars = 100
         while len(clean_line) > max_chars:
             c.drawString(x, y, clean_line[:max_chars])
@@ -103,7 +105,6 @@ def create_pdf_buffer(text: str, project_id=None, project_name=None):
 
     c.save()
     buffer.seek(0)
-
     return buffer
 
 
@@ -120,7 +121,10 @@ async def generate_doc(data: dict):
         file_url = data.get("file_url")
 
         if not file_url:
-            return {"status": "ERROR", "message": "file_url is required"}
+            return JSONResponse(
+                status_code=400,
+                content={"status": "ERROR", "message": "file_url is required"}
+            )
 
         # -------------------------
         # Download file
@@ -170,7 +174,10 @@ async def generate_doc(data: dict):
             text_content = file_content.decode("utf-8", errors="ignore")
 
         else:
-            return {"status": "ERROR", "message": f"Unsupported file type: {file_type}"}
+            return JSONResponse(
+                status_code=400,
+                content={"status": "ERROR", "message": f"Unsupported file type: {file_type}"}
+            )
 
         # Limit size
         text_content = text_content[:3000]
@@ -178,7 +185,6 @@ async def generate_doc(data: dict):
         # -------------------------
         # AI Prompt
         # -------------------------
-
         prompt = f"""
 Generate a professional Functional Specification Document (FSD).
 
@@ -205,7 +211,6 @@ Structure:
         # -------------------------
         # Cohere API
         # -------------------------
-
         ai_response = co.chat(
             model="command-a-03-2025",
             message=prompt,
@@ -215,9 +220,8 @@ Structure:
         fsd_output = ai_response.text
 
         # -------------------------
-        # Generate PDF in memory
+        # Generate PDF
         # -------------------------
-
         pdf_buffer = create_pdf_buffer(
             fsd_output,
             project_id,
@@ -226,18 +230,12 @@ Structure:
 
         pdf_bytes = pdf_buffer.getvalue()
 
-        # Generate unique ID
         file_id = str(uuid4())
 
-        # Store PDF in memory
+        # Store in memory
         TEMP_STORE[file_id] = pdf_bytes
 
-        # Convert to base64 (for APEX)
         pdf_base64 = base64.b64encode(pdf_bytes).decode("utf-8")
-
-        # -------------------------
-        # Final response
-        # -------------------------
 
         return {
             "status": "SUCCESS",
@@ -247,17 +245,24 @@ Structure:
         }
 
     except Exception as e:
-        return {"status": "ERROR", "message": str(e)}
+        return JSONResponse(
+            status_code=500,
+            content={"status": "ERROR", "message": str(e)}
+        )
 
 
 # -------------------------------------------------------------------
-# Download endpoint (link)
+# Download endpoint
 # -------------------------------------------------------------------
 
 @app.get("/download-inline/{file_id}")
 def download_inline(file_id: str):
+
     if file_id not in TEMP_STORE:
-        return {"status": "ERROR", "message": "File expired"}
+        return JSONResponse(
+            status_code=404,
+            content={"status": "ERROR", "message": "File expired"}
+        )
 
     file_bytes = TEMP_STORE[file_id]
 
@@ -265,6 +270,7 @@ def download_inline(file_id: str):
         io.BytesIO(file_bytes),
         media_type="application/pdf",
         headers={
-            "Content-Disposition": "attachment; filename=FSD.pdf"
+            "Content-Disposition": "attachment; filename=FSD.pdf",
+            "Cache-Control": "no-store"
         }
     )
