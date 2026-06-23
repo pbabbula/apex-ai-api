@@ -4,8 +4,10 @@ import requests
 import io
 import os
 import cohere
+import base64
 from uuid import uuid4
 from datetime import datetime
+import json
 import textwrap
 from urllib.parse import urlparse
 
@@ -15,150 +17,71 @@ from docx import Document
 from pptx import Presentation
 import pandas as pd
 
-import psycopg2
-import psycopg2.extras
-
 
 # -------------------------------------------------------------------
 # Config
 # -------------------------------------------------------------------
 
 COHERE_API_KEY = os.getenv("COHERE_API_KEY")
-DATABASE_URL = os.getenv("DATABASE_URL")
+
+if not COHERE_API_KEY:
+    raise RuntimeError("COHERE_API_KEY environment variable is missing")
+
+co = cohere.Client(COHERE_API_KEY)
 
 BASE_URL = os.getenv(
     "BASE_URL",
     "https://apex-ai-api.onrender.com"
 )
 
-if not COHERE_API_KEY:
-    raise RuntimeError("COHERE_API_KEY environment variable is missing")
-
-if not DATABASE_URL:
-    raise RuntimeError("DATABASE_URL environment variable is missing")
-
-co = cohere.Client(COHERE_API_KEY)
+# If you later use Render Persistent Disk, set FILE_STORE_DIR to mounted path.
+# Example: /var/data/file_store
+FILE_STORE_DIR = os.getenv("FILE_STORE_DIR", "file_store")
 
 app = FastAPI(title="APEX AI FSD Generator")
 
+FILE_METADATA = {}
+
 
 # -------------------------------------------------------------------
-# Database helpers
+# Storage helpers
 # -------------------------------------------------------------------
 
-def get_db_connection():
-    return psycopg2.connect(DATABASE_URL)
+def ensure_store_dir():
+    os.makedirs(FILE_STORE_DIR, exist_ok=True)
 
 
-def init_db():
-    conn = get_db_connection()
-    cur = conn.cursor()
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS fsd_documents (
-            file_id TEXT PRIMARY KEY,
-            project_id TEXT,
-            project_name TEXT,
-            file_url TEXT,
-            file_type TEXT,
-            fsd_output TEXT NOT NULL,
-            pdf_bytes BYTEA NOT NULL,
-            created_at TIMESTAMP NOT NULL
-        );
-    """)
-
-    conn.commit()
-    cur.close()
-    conn.close()
+def get_metadata_path(file_id):
+    ensure_store_dir()
+    return os.path.join(FILE_STORE_DIR, f"{file_id}.json")
 
 
-@app.on_event("startup")
-def startup_event():
-    init_db()
+def save_metadata(file_id, metadata):
+    ensure_store_dir()
+
+    file_path = get_metadata_path(file_id)
+
+    with open(file_path, "w", encoding="utf-8") as f:
+        json.dump(metadata, f, ensure_ascii=False)
+
+    FILE_METADATA[file_id] = metadata
 
 
-def save_document_to_db(
-    file_id,
-    project_id,
-    project_name,
-    file_url,
-    file_type,
-    fsd_output,
-    pdf_bytes
-):
-    conn = get_db_connection()
-    cur = conn.cursor()
+def load_metadata(file_id):
+    try:
+        file_path = get_metadata_path(file_id)
 
-    cur.execute("""
-        INSERT INTO fsd_documents (
-            file_id,
-            project_id,
-            project_name,
-            file_url,
-            file_type,
-            fsd_output,
-            pdf_bytes,
-            created_at
-        )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-    """, (
-        file_id,
-        project_id,
-        project_name,
-        file_url,
-        file_type,
-        fsd_output,
-        psycopg2.Binary(pdf_bytes),
-        datetime.utcnow()
-    ))
+        if not os.path.exists(file_path):
+            return None
 
-    conn.commit()
-    cur.close()
-    conn.close()
+        with open(file_path, "r", encoding="utf-8") as f:
+            metadata = json.load(f)
 
+        FILE_METADATA[file_id] = metadata
+        return metadata
 
-def get_document_from_db(file_id):
-    conn = get_db_connection()
-    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-
-    cur.execute("""
-        SELECT
-            file_id,
-            project_id,
-            project_name,
-            file_url,
-            file_type,
-            fsd_output,
-            pdf_bytes,
-            created_at
-        FROM fsd_documents
-        WHERE file_id = %s
-    """, (file_id,))
-
-    row = cur.fetchone()
-
-    cur.close()
-    conn.close()
-
-    return row
-
-
-def update_pdf_in_db(file_id, pdf_bytes):
-    conn = get_db_connection()
-    cur = conn.cursor()
-
-    cur.execute("""
-        UPDATE fsd_documents
-        SET pdf_bytes = %s
-        WHERE file_id = %s
-    """, (
-        psycopg2.Binary(pdf_bytes),
-        file_id
-    ))
-
-    conn.commit()
-    cur.close()
-    conn.close()
+    except Exception:
+        return None
 
 
 # -------------------------------------------------------------------
@@ -286,7 +209,8 @@ def create_pdf_buffer(text, project_id=None, project_name=None):
                 "scope",
                 "assumption",
                 "dependency",
-                "acceptance"
+                "acceptance",
+                "conclusion"
             ))
         )
 
@@ -351,7 +275,23 @@ Source Content:
 def home():
     return {
         "status": "API running",
-        "service": "APEX AI FSD Generator"
+        "storage": FILE_STORE_DIR
+    }
+
+
+# -------------------------------------------------------------------
+# DEBUG FILES
+# -------------------------------------------------------------------
+
+@app.get("/debug-files")
+def debug_files():
+    ensure_store_dir()
+
+    return {
+        "status": "SUCCESS",
+        "store_dir": FILE_STORE_DIR,
+        "memory_ids": list(FILE_METADATA.keys()),
+        "disk_files": os.listdir(FILE_STORE_DIR)
     }
 
 
@@ -411,7 +351,6 @@ async def generate_doc(data: dict):
                 }
             )
 
-        # Limit AI input size
         text_content = text_content[:6000]
 
         if not text_content.strip():
@@ -450,7 +389,7 @@ async def generate_doc(data: dict):
             )
 
         # ------------------------------------------------------------
-        # Create PDF once
+        # Create PDF
         # ------------------------------------------------------------
         pdf_buffer = create_pdf_buffer(
             fsd_output,
@@ -459,21 +398,21 @@ async def generate_doc(data: dict):
         )
 
         pdf_bytes = pdf_buffer.getvalue()
+        pdf_base64 = base64.b64encode(pdf_bytes).decode("utf-8")
 
         file_id = str(uuid4())
 
-        # ------------------------------------------------------------
-        # Save permanently in PostgreSQL
-        # ------------------------------------------------------------
-        save_document_to_db(
-            file_id=file_id,
-            project_id=project_id,
-            project_name=project_name,
-            file_url=file_url,
-            file_type=file_type,
-            fsd_output=fsd_output,
-            pdf_bytes=pdf_bytes
-        )
+        metadata = {
+            "project_id": project_id,
+            "project_name": project_name,
+            "file_url": file_url,
+            "file_type": file_type,
+            "fsd_output": fsd_output,
+            "pdf_base64": pdf_base64,
+            "created_at": datetime.now().isoformat()
+        }
+
+        save_metadata(file_id, metadata)
 
         return {
             "status": "SUCCESS",
@@ -517,7 +456,7 @@ async def generate_doc(data: dict):
 @app.get("/download-inline/{file_id}")
 def download_inline(file_id: str):
     try:
-        metadata = get_document_from_db(file_id)
+        metadata = FILE_METADATA.get(file_id) or load_metadata(file_id)
 
         if not metadata:
             return JSONResponse(
@@ -528,9 +467,18 @@ def download_inline(file_id: str):
                 }
             )
 
-        pdf_bytes = bytes(metadata["pdf_bytes"])
-        pdf_buffer = io.BytesIO(pdf_bytes)
-        pdf_buffer.seek(0)
+        # Prefer saved PDF base64
+        if metadata.get("pdf_base64"):
+            pdf_bytes = base64.b64decode(metadata["pdf_base64"])
+            pdf_buffer = io.BytesIO(pdf_bytes)
+            pdf_buffer.seek(0)
+        else:
+            # Fallback: regenerate PDF from saved FSD text
+            pdf_buffer = create_pdf_buffer(
+                metadata["fsd_output"],
+                metadata["project_id"],
+                metadata["project_name"]
+            )
 
         project_id = metadata.get("project_id") or "NA"
         filename = f"FSD_{project_id}.pdf"
@@ -560,7 +508,7 @@ def download_inline(file_id: str):
 @app.post("/refresh-doc/{file_id}")
 async def refresh_doc(file_id: str):
     try:
-        metadata = get_document_from_db(file_id)
+        metadata = FILE_METADATA.get(file_id) or load_metadata(file_id)
 
         if not metadata:
             return JSONResponse(
@@ -578,8 +526,12 @@ async def refresh_doc(file_id: str):
         )
 
         pdf_bytes = pdf_buffer.getvalue()
+        pdf_base64 = base64.b64encode(pdf_bytes).decode("utf-8")
 
-        update_pdf_in_db(file_id, pdf_bytes)
+        metadata["pdf_base64"] = pdf_base64
+        metadata["refreshed_at"] = datetime.now().isoformat()
+
+        save_metadata(file_id, metadata)
 
         return {
             "status": "SUCCESS",
@@ -604,7 +556,7 @@ async def refresh_doc(file_id: str):
 @app.get("/document/{file_id}")
 def get_document(file_id: str):
     try:
-        metadata = get_document_from_db(file_id)
+        metadata = FILE_METADATA.get(file_id) or load_metadata(file_id)
 
         if not metadata:
             return JSONResponse(
@@ -617,14 +569,14 @@ def get_document(file_id: str):
 
         return {
             "status": "SUCCESS",
-            "file_id": metadata["file_id"],
-            "project_id": metadata["project_id"],
-            "project_name": metadata["project_name"],
-            "file_url": metadata["file_url"],
-            "file_type": metadata["file_type"],
-            "document": metadata["fsd_output"],
+            "file_id": file_id,
+            "project_id": metadata.get("project_id"),
+            "project_name": metadata.get("project_name"),
+            "file_url": metadata.get("file_url"),
+            "file_type": metadata.get("file_type"),
+            "document": metadata.get("fsd_output"),
             "download_link": f"{BASE_URL}/download-inline/{file_id}",
-            "created_at": str(metadata["created_at"])
+            "created_at": metadata.get("created_at")
         }
 
     except Exception as e:
