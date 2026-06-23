@@ -8,4 +8,3 @@ pandas
 openpyxl
 xlrd
 reportlab
-psycopg2-binary
